@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"bytes"
 	"context"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/widget"
 
 	"github.com/beevik/etree"
 	onvif "github.com/use-go/onvif"
@@ -35,13 +37,13 @@ func discoverCamerasONVIF() []Camera {
 	// Use empty string for interface to probe all
 	devices, err := discover.SendProbe("", nil, []string{"dn:NetworkVideoTransmitter"}, map[string]string{"dn": "http://www.onvif.org/ver10/network/wsdl"})
 	if err != nil {
-		fmt.Println("ONVIF discovery error:", err)
+		if debugMode { fmt.Println("ONVIF discovery error:", err) }
 		return cameras
 	}
 	for _, j := range devices {
 		doc := etree.NewDocument()
 		if err := doc.ReadFromString(j); err != nil {
-			fmt.Println("ONVIF XML parse error:", err)
+			if debugMode { fmt.Println("ONVIF XML parse error:", err) }
 			continue
 		}
 		endpoints := doc.Root().FindElements("./Body/ProbeMatches/ProbeMatch/XAddrs")
@@ -135,7 +137,7 @@ func extractRTSPUri(xml string) string {
 // ffmpegStreamToImage runs ffmpeg to decode RTSP to JPEG images and sends them to imgChan
 func ffmpegStreamToImage(ctx context.Context, rtspURL string, imgChan chan image.Image, wg *sync.WaitGroup) {
 	defer func() {
-		fmt.Println("[DEBUG] ffmpegStreamToImage exiting for", rtspURL)
+		if debugMode { fmt.Println("[DEBUG] ffmpegStreamToImage exiting for", rtspURL) }
 		wg.Done()
 	}()
 	cmd := exec.Command("ffmpeg", "-rtsp_transport", "tcp", "-i", rtspURL, "-f", "image2pipe", "-vcodec", "mjpeg", "-")
@@ -143,11 +145,11 @@ func ffmpegStreamToImage(ctx context.Context, rtspURL string, imgChan chan image
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		fmt.Println("FFmpeg stdout pipe error:", err)
+		if debugMode { fmt.Println("FFmpeg stdout pipe error:", err) }
 		return
 	}
 	if err := cmd.Start(); err != nil {
-		fmt.Println("FFmpeg start error:", err)
+		if debugMode { fmt.Println("FFmpeg start error:", err) }
 		return
 	}
 	// Robust: kill ffmpeg process group on context cancel
@@ -155,7 +157,7 @@ func ffmpegStreamToImage(ctx context.Context, rtspURL string, imgChan chan image
 	go func() {
 		select {
 		case <-ctx.Done():
-			fmt.Println("[DEBUG] Killing ffmpeg process group for", rtspURL)
+			if debugMode { fmt.Println("[DEBUG] Killing ffmpeg process group for", rtspURL) }
 			pgid, err := syscall.Getpgid(cmd.Process.Pid)
 			if err == nil {
 				_ = syscall.Kill(-pgid, syscall.SIGKILL)
@@ -168,7 +170,7 @@ func ffmpegStreamToImage(ctx context.Context, rtspURL string, imgChan chan image
 	}()
 	defer func() {
 		close(done)
-		fmt.Println("[DEBUG] Final kill for ffmpeg process group", rtspURL)
+		if debugMode { fmt.Println("[DEBUG] Final kill for ffmpeg process group", rtspURL) }
 		pgid, err := syscall.Getpgid(cmd.Process.Pid)
 		if err == nil {
 			_ = syscall.Kill(-pgid, syscall.SIGKILL)
@@ -181,7 +183,7 @@ func ffmpegStreamToImage(ctx context.Context, rtspURL string, imgChan chan image
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("[DEBUG] Context cancelled in main ffmpeg loop for", rtspURL)
+			if debugMode { fmt.Println("[DEBUG] Context cancelled in main ffmpeg loop for", rtspURL) }
 			return
 		default:
 		}
@@ -190,7 +192,7 @@ func ffmpegStreamToImage(ctx context.Context, rtspURL string, imgChan chan image
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Println("[DEBUG] Context cancelled in JPEG read loop for", rtspURL)
+				if debugMode { fmt.Println("[DEBUG] Context cancelled in JPEG read loop for", rtspURL) }
 				return
 			default:
 			}
@@ -199,10 +201,10 @@ func ffmpegStreamToImage(ctx context.Context, rtspURL string, imgChan chan image
 			if err != nil {
 				// If context is done, exit quietly
 				if ctx.Err() != nil {
-					fmt.Println("[DEBUG] Context done detected after read error for", rtspURL)
+					if debugMode { fmt.Println("[DEBUG] Context done detected after read error for", rtspURL) }
 					return
 				}
-				fmt.Println("FFmpeg read error:", err)
+				if debugMode { fmt.Println("FFmpeg read error:", err) }
 				return
 			}
 			imgBuf.WriteByte(b[0])
@@ -212,7 +214,7 @@ func ffmpegStreamToImage(ctx context.Context, rtspURL string, imgChan chan image
 		}
 		img, err := jpeg.Decode(bytes.NewReader(imgBuf.Bytes()))
 		if err != nil {
-			fmt.Println("JPEG decode error:", err)
+			if debugMode { fmt.Println("JPEG decode error:", err) }
 			continue
 		}
 		imgChan <- img
@@ -272,11 +274,21 @@ func coloredImage(c color.Color, w, h int) *image.RGBA {
 	return img
 }
 
+// Global debug flag
+var debugMode bool
+
 func main() {
-	// Add a command-line flag for the TOML file
+	// Add command-line flags
+	debug := flag.String("debug", "No", "Enable debug output (Yes/No)")
+	flag.Parse()
+	
+	// Set debug mode based on flag
+	debugMode = *debug == "Yes"
+	
+	// Get TOML file from command-line args
 	tomlFile := "tapo-ip.toml"
-	if len(os.Args) > 1 {
-		tomlFile = os.Args[1]
+	if flag.NArg() > 0 {
+		tomlFile = flag.Arg(0)
 	}
 
 	myApp := app.New()
@@ -303,13 +315,15 @@ func main() {
 				fmt.Fprintf(f, "password = \"%s\"\n", cam.Password)
 				if cam.RTSPPath != "" {
 					fmt.Fprintf(f, "rtsp_path = \"%s\"\n", cam.RTSPPath)
+					fmt.Fprintf(f, "lq_rtsp_path = \"%s\"\n", cam.RTSPPath)
 				} else {
 					fmt.Fprintf(f, "rtsp_path = \"/stream1\"\n")
+					fmt.Fprintf(f, "lq_rtsp_path = \"/stream1\"\n")
 				}
 			}
 			f.Close()
 		} else {
-			fmt.Println("Failed to write", tomlFile+":", err)
+			if debugMode { fmt.Println("Failed to write", tomlFile+":", err) }
 		}
 	}
 
@@ -320,12 +334,21 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Stream state: HQ/LQ per camera
+	streamQualities := make([]bool, 4) // true = HQ, false = LQ
+	streamCancelFuncs := make([]context.CancelFunc, 4)
+
 	for i := 0; i < len(cameras) && i < 4; i++ {
 		imgChans[i] = make(chan image.Image, 1)
 		imgs[i] = canvas.NewImageFromImage(coloredImage(color.RGBA{128, 128, 128, 255}, 640, 360))
 		imgs[i].FillMode = canvas.ImageFillContain
+
+		// Start with LQ stream
+		streamQualities[i] = false
+		camCtx, camCancel := context.WithCancel(ctx)
+		streamCancelFuncs[i] = camCancel
 		wg.Add(1)
-		go ffmpegStreamToImage(ctx, cameras[i].RTSPUrl, imgChans[i], &wg)
+		go ffmpegStreamToImage(camCtx, fmt.Sprintf("rtsp://%s:%s@%s:554%s", cameras[i].Username, cameras[i].Password, cameras[i].IP, cameras[i].LQRTSPPath), imgChans[i], &wg)
 	}
 
 	// Use Fyne's animation API for main-thread UI updates
@@ -346,16 +369,57 @@ func main() {
 		anim.Start()
 	}
 
+	// Add HQ/LQ toggle buttons
+	qualityButtons := make([]fyne.CanvasObject, 4)
+	for i := 0; i < 4; i++ {
+		idx := i
+		var btn *widget.Button
+		btnLabel := "LQ"
+		if streamQualities[idx] {
+			btnLabel = "HQ"
+		}
+		btn = widget.NewButton(btnLabel, func() {
+			if streamQualities[idx] {
+				// Currently HQ, switch to LQ
+				streamQualities[idx] = false
+				btn.SetText("LQ")
+				btn.Refresh()
+				streamCancelFuncs[idx]() // Cancel current HQ stream
+				camCtx, camCancel := context.WithCancel(ctx)
+				streamCancelFuncs[idx] = camCancel
+				wg.Add(1)
+				go ffmpegStreamToImage(camCtx, fmt.Sprintf("rtsp://%s:%s@%s:554%s", cameras[idx].Username, cameras[idx].Password, cameras[idx].IP, cameras[idx].LQRTSPPath), imgChans[idx], &wg)
+			} else {
+				// Currently LQ, switch to HQ
+				streamQualities[idx] = true
+				btn.SetText("HQ")
+				btn.Refresh()
+				streamCancelFuncs[idx]() // Cancel current LQ stream
+				camCtx, camCancel := context.WithCancel(ctx)
+				streamCancelFuncs[idx] = camCancel
+				wg.Add(1)
+				go ffmpegStreamToImage(camCtx, fmt.Sprintf("rtsp://%s:%s@%s:554%s", cameras[idx].Username, cameras[idx].Password, cameras[idx].IP, cameras[idx].RTSPPath), imgChans[idx], &wg)
+			}
+		})
+		btn.Alignment = widget.ButtonAlignCenter
+		qualityButtons[i] = container.NewCenter(btn)
+	}
+
+	// Compose each cell: image + button at bottom right
+	cells := make([]fyne.CanvasObject, 4)
+	for i := 0; i < 4; i++ {
+		cells[i] = container.NewBorder(nil, qualityButtons[i], nil, nil, imgs[i])
+	}
 
 	grid := container.NewGridWithRows(2,
-		container.NewGridWithColumns(2, imgs[0], imgs[1]),
-		container.NewGridWithColumns(2, imgs[2], imgs[3]),
+		container.NewGridWithColumns(2, cells[0], cells[1]),
+		container.NewGridWithColumns(2, cells[2], cells[3]),
 	)
 
 	myWindow.SetContent(grid)
 
 	myWindow.SetOnClosed(func() {
-		fmt.Println("[DEBUG] Window closed, cancelling context")
+		if debugMode { fmt.Println("[DEBUG] Window closed, cancelling context") }
 		cancel()
 	})
 
@@ -368,9 +432,9 @@ func main() {
 	}()
 	select {
 	case <-exitDone:
-		fmt.Println("[DEBUG] All goroutines exited cleanly.")
+		if debugMode { fmt.Println("[DEBUG] All goroutines exited cleanly.") }
 	case <-time.After(2 * time.Second):
-		fmt.Println("[DEBUG] Force exiting due to stuck goroutine.")
+		if debugMode { fmt.Println("[DEBUG] Force exiting due to stuck goroutine.") }
 		os.Exit(0)
 	}
 }
