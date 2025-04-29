@@ -5,21 +5,25 @@ ip = "192.168.0.10"
 username = "username"
 password = "password"
 rtsp_path = "/stream1"
+lq_rtsp_path = "/stream2"
 
 [[tapo_cameras]]
 ip = "192.168.0.11"
 username = "username"
 password = "password"
 rtsp_path = "/stream1"
+lq_rtsp_path = "/stream2"
 
 [[tapo_cameras]]
 ip = "192.168.0.12"
 username = "username"
 password = "password"
 rtsp_path = "/stream1"
+lq_rtsp_path = "/stream2"
 
 [[tapo_cameras]]
 ip = "192.168.0.13"
 username = "username"
 password = "password"
 rtsp_path = "/stream1"
+lq_rtsp_path = "/stream2"
